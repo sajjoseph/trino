@@ -133,7 +133,7 @@ public class ProxyResource
 
     @POST
     @Path("/v1/statement")
-    @Produces(APPLICATION_JSON)
+    @Produces({APPLICATION_JSON, "application/msgpack"})
     public void postStatement(
             String statement,
             @Context HttpServletRequest servletRequest,
@@ -149,7 +149,7 @@ public class ProxyResource
 
     @GET
     @Path("/v1/proxy")
-    @Produces(APPLICATION_JSON)
+    @Produces({APPLICATION_JSON, "application/msgpack"})
     public void getNext(
             @QueryParam("uri") String uri,
             @QueryParam("hmac") String hash,

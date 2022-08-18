@@ -13,6 +13,8 @@
  */
 package io.trino.server.protocol;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.Ordering;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -30,6 +32,7 @@ import io.trino.server.ServerConfig;
 import io.trino.server.security.ResourceSecurity;
 import io.trino.spi.QueryId;
 import io.trino.spi.block.BlockEncodingSerde;
+import org.msgpack.jackson.dataformat.MessagePackFactory;
 
 import javax.annotation.PreDestroy;
 import javax.inject.Inject;
@@ -44,11 +47,14 @@ import javax.ws.rs.container.AsyncResponse;
 import javax.ws.rs.container.Suspended;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.Request;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.Response.ResponseBuilder;
 import javax.ws.rs.core.UriInfo;
+import javax.ws.rs.core.Variant;
 
 import java.net.URLEncoder;
+import java.util.List;
 import java.util.Map.Entry;
 import java.util.NoSuchElementException;
 import java.util.concurrent.ConcurrentHashMap;
@@ -90,6 +96,7 @@ public class ExecutingStatementResource
     private final ScheduledExecutorService queryPurger = newSingleThreadScheduledExecutor(threadsNamed("execution-query-purger"));
     private final PreparedStatementEncoder preparedStatementEncoder;
     private final boolean compressionEnabled;
+    private final ObjectMapper objectMapper = new ObjectMapper(new MessagePackFactory().setReuseResourceInGenerator(false));
 
     @Inject
     public ExecutingStatementResource(
@@ -146,7 +153,7 @@ public class ExecutingStatementResource
     @ResourceSecurity(PUBLIC)
     @GET
     @Path("{queryId}/{slug}/{token}")
-    @Produces(MediaType.APPLICATION_JSON)
+    @Produces({MediaType.APPLICATION_JSON, "application/msgpack"})
     public void getQueryResults(
             @PathParam("queryId") QueryId queryId,
             @PathParam("slug") String slug,
@@ -154,10 +161,11 @@ public class ExecutingStatementResource
             @QueryParam("maxWait") Duration maxWait,
             @QueryParam("targetResultSize") DataSize targetResultSize,
             @Context UriInfo uriInfo,
-            @Suspended AsyncResponse asyncResponse)
+            @Suspended AsyncResponse asyncResponse,
+            @Context Request request)
     {
         Query query = getQuery(queryId, slug, token);
-        asyncQueryResults(query, token, maxWait, targetResultSize, uriInfo, asyncResponse);
+        asyncQueryResults(query, token, maxWait, targetResultSize, uriInfo, asyncResponse, request);
     }
 
     protected Query getQuery(QueryId queryId, String slug, long token)
@@ -202,7 +210,8 @@ public class ExecutingStatementResource
             Duration maxWait,
             DataSize targetResultSize,
             UriInfo uriInfo,
-            AsyncResponse asyncResponse)
+            AsyncResponse asyncResponse,
+            Request request)
     {
         Duration wait = WAIT_ORDERING.min(MAX_WAIT_TIME, maxWait);
         if (targetResultSize == null) {
@@ -213,14 +222,49 @@ public class ExecutingStatementResource
         }
         ListenableFuture<QueryResults> queryResultsFuture = query.waitForResults(token, uriInfo, wait, targetResultSize);
 
-        ListenableFuture<Response> response = Futures.transform(queryResultsFuture, queryResults -> toResponse(query, queryResults), directExecutor());
+        // Detect the Mediatype we can use.
+        MediaType responseMediaType = detectResponseMediaType(request);
+        ListenableFuture<Response> response = Futures.transform(queryResultsFuture, queryResults -> toResponse(query, queryResults, responseMediaType), directExecutor());
 
         bindAsyncResponse(asyncResponse, response, responseExecutor);
     }
 
-    private Response toResponse(Query query, QueryResults queryResults)
+    private MediaType detectResponseMediaType(Request request)
     {
-        ResponseBuilder response = Response.ok(queryResults);
+        List<Variant> responseVariants = Variant.mediaTypes(
+                new MediaType("application", "msgpack"),
+                MediaType.valueOf(MediaType.APPLICATION_JSON)
+        ).build();
+        Variant bestResponseVariant = request.selectVariant(responseVariants);
+        if (bestResponseVariant == null) {
+            return MediaType.APPLICATION_JSON_TYPE; // Defaulting to JSON type.
+        }
+        return bestResponseVariant.getMediaType();
+    }
+
+    private ResponseBuilder prepareResponseBuilder(QueryResults queryResults, MediaType responseMediaType)
+    {
+        ResponseBuilder responseBuilder;
+        if (responseMediaType.getSubtype().equals("msgpack")) {
+            try {
+                responseBuilder = Response.ok(objectMapper.writeValueAsBytes(queryResults));
+                responseBuilder.type("application/msgpack");
+            }
+            catch (JsonProcessingException e) {
+                log.debug("data encoding using msgpack failed. %s", e.getMessage());
+                // Switching back to JSON encoding.
+                responseBuilder = Response.ok(queryResults);
+            }
+        }
+        else {
+            responseBuilder = Response.ok(queryResults);
+        }
+        return responseBuilder;
+    }
+
+    private Response toResponse(Query query, QueryResults queryResults, MediaType responseMediaType)
+    {
+        ResponseBuilder response = prepareResponseBuilder(queryResults, responseMediaType);
 
         ProtocolHeaders protocolHeaders = query.getProtocolHeaders();
         query.getSetCatalog().ifPresent(catalog -> response.header(protocolHeaders.responseSetCatalog(), catalog));
@@ -270,7 +314,7 @@ public class ExecutingStatementResource
     @ResourceSecurity(PUBLIC)
     @DELETE
     @Path("{queryId}/{slug}/{token}")
-    @Produces(MediaType.APPLICATION_JSON)
+    @Produces({MediaType.APPLICATION_JSON, "application/msgpack"})
     public Response cancelQuery(
             @PathParam("queryId") QueryId queryId,
             @PathParam("slug") String slug,
