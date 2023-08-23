@@ -216,6 +216,7 @@ import io.trino.sql.planner.iterative.rule.RewriteTableFunctionToTableScan;
 import io.trino.sql.planner.iterative.rule.SimplifyCountOverConstant;
 import io.trino.sql.planner.iterative.rule.SimplifyExpressions;
 import io.trino.sql.planner.iterative.rule.SimplifyFilterPredicate;
+import io.trino.sql.planner.iterative.rule.SimplifySumOverConstant;
 import io.trino.sql.planner.iterative.rule.SingleDistinctAggregationToGroupBy;
 import io.trino.sql.planner.iterative.rule.TransformCorrelatedDistinctAggregationWithProjection;
 import io.trino.sql.planner.iterative.rule.TransformCorrelatedDistinctAggregationWithoutProjection;
@@ -454,6 +455,7 @@ public class PlanOptimizers
                                         new PruneOrderByInAggregation(metadata),
                                         new RewriteSpatialPartitioningAggregation(plannerContext),
                                         new SimplifyCountOverConstant(plannerContext),
+                                        new SimplifySumOverConstant(plannerContext),
                                         new PreAggregateCaseAggregations(plannerContext, typeAnalyzer)))
                                 .build()),
                 new IterativeOptimizer(
